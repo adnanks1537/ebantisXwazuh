@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -23,10 +23,10 @@ app = FastAPI(
 
 # CORS configuration
 origins = [
-    "http://localhost:3000",  # Example: Local front-end (e.g., React dev server)
-    "https://your-frontend.com",  # Replace with your actual front-end domain
-    "https://98.70.144.86:55000",  # Wazuh server (optional, if needed)
-    "*"  # Wildcard for testing; remove in production for security
+    "http://localhost:3000",
+    "https://your-frontend.com",  # Replace with your front-end domain
+    "https://98.70.144.86:55000",
+    "*"  # Remove in production
 ]
 
 app.add_middleware(
@@ -81,36 +81,45 @@ class AgentQuery(BaseModel):
     offset: Optional[int] = 0
     status: Optional[str] = None
 
-class WazuhAlert(BaseModel):
-    timestamp: str
-    rule: dict
-    agent: dict
-    syscheck: Optional[dict] = None
-    # Add more fields as needed based on Wazuh alert structure
-
 # Endpoint: Receive Wazuh alerts
 @app.post(
     "/wazuh-alerts",
     summary="Receive alerts from Wazuh"
 )
-async def receive_alert(alert: WazuhAlert, db: Session = Depends(get_db)):
+async def receive_alert(alert: Dict[Any, Any], db: Session = Depends(get_db)):
     try:
+        # Log raw alert for debugging
+        logger.debug(f"Received raw alert: {alert}")
+
+        # Extract required fields
+        timestamp_str = alert.get("timestamp")
+        rule = alert.get("rule", {})
+        agent = alert.get("agent", {})
+
+        # Parse timestamp (handle +0000 format)
+        try:
+            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f+0000")
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid timestamp format: {timestamp_str}, error: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {timestamp_str}")
+
+        # Create database entry
         db_alert = Alert(
-            timestamp=datetime.strptime(alert.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ"),
-            rule_id=alert.rule.get("id"),
-            rule_description=alert.rule.get("description"),
-            rule_level=alert.rule.get("level"),
-            agent_id=alert.agent.get("id"),
-            agent_name=alert.agent.get("name"),
-            event=str(alert.dict())  # Store full alert as JSON string
+            timestamp=timestamp,
+            rule_id=rule.get("id", ""),
+            rule_description=rule.get("description", ""),
+            rule_level=rule.get("level", 0),
+            agent_id=agent.get("id", ""),
+            agent_name=agent.get("name", ""),
+            event=json.dumps(alert)  # Store full alert as JSON string
         )
         db.add(db_alert)
         db.commit()
-        logger.info(f"Received and stored alert: rule_id={alert.rule.get('id')}")
+        logger.info(f"Stored alert: rule_id={rule.get('id')}, timestamp={timestamp_str}")
         return {"status": "success"}
     except Exception as e:
-        logger.error(f"Error storing alert: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error storing alert: {str(e)}")
+        logger.error(f"Error processing alert: {str(e)}, alert={alert}")
+        raise HTTPException(status_code=500, detail=f"Error processing alert: {str(e)}")
 
 # Endpoint: Fetch alerts
 @app.get(
