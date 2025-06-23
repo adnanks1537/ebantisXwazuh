@@ -1,0 +1,193 @@
+import os
+import logging
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel
+from typing import Optional, List
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from datetime import datetime
+import uvicorn
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# FastAPI app
+app = FastAPI(
+    title="Wazuh Alerts API",
+    description="Receive and query Wazuh alerts",
+    version="1.0.0"
+)
+
+# SQLite database setup
+DATABASE_URL = "sqlite:///wazuh_alerts.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+# Database model for alerts
+class Alert(Base):
+    __tablename__ = "alerts"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime)
+    rule_id = Column(String)
+    rule_description = Column(String)
+    rule_level = Column(Integer)
+    agent_id = Column(String)
+    agent_name = Column(String)
+    event = Column(Text)  # Full JSON alert as text
+
+
+# Create database tables
+Base.metadata.create_all(bind=engine)
+
+
+# Dependency for database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# Pydantic models for API
+class AlertQuery(BaseModel):
+    limit: Optional[int] = 10
+    offset: Optional[int] = 0
+    rule_level: Optional[int] = None
+    agent_id: Optional[str] = None
+
+
+class SummaryQuery(BaseModel):
+    timeframe: Optional[str] = None  # e.g., "24h"
+
+
+class AgentQuery(BaseModel):
+    limit: Optional[int] = 10
+    offset: Optional[int] = 0
+    status: Optional[str] = None
+
+
+class WazuhAlert(BaseModel):
+    timestamp: str
+    rule: dict
+    agent: dict
+    syscheck: Optional[dict] = None
+    # Add more fields as needed based on Wazuh alert structure
+
+
+# Endpoint: Receive Wazuh alerts
+@app.post(
+    "/wazuh-alerts",
+    summary="Receive alerts from Wazuh"
+)
+async def receive_alert(alert: WazuhAlert, db: Session = Depends(get_db)):
+    try:
+        db_alert = Alert(
+            timestamp=datetime.strptime(alert.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ"),
+            rule_id=alert.rule.get("id"),
+            rule_description=alert.rule.get("description"),
+            rule_level=alert.rule.get("level"),
+            agent_id=alert.agent.get("id"),
+            agent_name=alert.agent.get("name"),
+            event=str(alert.dict())  # Store full alert as JSON string
+        )
+        db.add(db_alert)
+        db.commit()
+        logger.info(f"Received and stored alert: rule_id={alert.rule.get('id')}")
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error storing alert: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error storing alert: {str(e)}")
+
+
+# Endpoint: Fetch alerts
+@app.get(
+    "/alerts",
+    summary="Fetch stored Wazuh alerts"
+)
+async def get_alerts(query: AlertQuery = Depends(), db: Session = Depends(get_db)):
+    try:
+        db_query = db.query(Alert)
+        if query.rule_level:
+            db_query = db_query.filter(Alert.rule_level >= query.rule_level)
+        if query.agent_id:
+            db_query = db_query.filter(Alert.agent_id == query.agent_id)
+
+        total = db_query.count()
+        alerts = db_query.offset(query.offset).limit(query.limit).all()
+
+        return {
+            "alerts": [
+                {
+                    "timestamp": a.timestamp.isoformat(),
+                    "rule": {"id": a.rule_id, "description": a.rule_description, "level": a.rule_level},
+                    "agent": {"id": a.agent_id, "name": a.agent_name},
+                    "event": a.event
+                } for a in alerts
+            ],
+            "total": total
+        }
+    except Exception as e:
+        logger.error(f"Error fetching alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching alerts: {str(e)}")
+
+
+# Endpoint: Fetch alerts summary
+@app.get(
+    "/alerts/summary",
+    summary="Fetch alerts summary"
+)
+async def get_alerts_summary(query: SummaryQuery = Depends(), db: Session = Depends(get_db)):
+    try:
+        db_query = db.query(Alert)
+        if query.timeframe:
+            hours = int(query.timeframe.replace("h", ""))
+            time_threshold = datetime.utcnow() - timedelta(hours=hours)
+            db_query = db_query.filter(Alert.timestamp >= time_threshold)
+
+        # Example summary: count by rule level
+        from sqlalchemy.sql import func
+        summary = db_query.group_by(Alert.rule_level).with_entities(
+            Alert.rule_level, func.count(Alert.id).label("count")
+        ).all()
+
+        return {
+            "summary": [{"rule_level": r.rule_level, "count": r.count} for r in summary],
+            "total": len(summary)
+        }
+    except Exception as e:
+        logger.error(f"Error fetching summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching summary: {str(e)}")
+
+
+# Endpoint: Fetch agent information
+@app.get(
+    "/agents",
+    summary="Fetch agent information from alerts"
+)
+async def get_agents(query: AgentQuery = Depends(), db: Session = Depends(get_db)):
+    try:
+        db_query = db.query(Alert.agent_id, Alert.agent_name).distinct()
+        if query.status:  # Note: Status not in alerts; adjust if needed
+            logger.warning("Agent status filter not supported in this implementation")
+
+        total = db_query.count()
+        agents = db_query.offset(query.offset).limit(query.limit).all()
+
+        return {
+            "agents": [
+                {"id": a.agent_id, "name": a.agent_name} for a in agents
+            ],
+            "total": total
+        }
+    except Exception as e:
+        logger.error(f"Error fetching agents: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching agents: {str(e)}")
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
