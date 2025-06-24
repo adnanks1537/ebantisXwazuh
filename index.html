@@ -9,86 +9,174 @@
     body { background-color: #f8f9fa; }
     .card { margin-bottom: 20px; }
     .alert-box { white-space: pre-wrap; }
+    th.sortable { cursor: pointer; }
   </style>
 </head>
 <body>
 <div class="container py-4">
   <h1 class="mb-4">SIEM Alert Dashboard</h1>
 
-  <div class="row" id="summary-cards">
-    <!-- Summary Cards Go Here -->
-  </div>
+  <div class="row" id="summary-cards"></div>
 
   <h2 class="mt-4">Recent Alerts</h2>
+
+  <form id="filter-form" class="row g-3 mb-3">
+    <div class="col-md-3">
+      <input type="text" class="form-control" id="agent-name" placeholder="Agent Name">
+    </div>
+    <div class="col-md-2">
+      <input type="date" class="form-control" id="start-date">
+    </div>
+    <div class="col-md-2">
+      <input type="date" class="form-control" id="end-date">
+    </div>
+    <div class="col-md-3">
+      <select class="form-select" id="level-filter">
+        <option value="">All Severities</option>
+        <option value="critical">Critical</option>
+        <option value="high">High</option>
+        <option value="medium">Medium</option>
+        <option value="low">Low</option>
+        <option value="info">Info</option>
+      </select>
+    </div>
+  </form>
+
   <div class="table-responsive">
     <table class="table table-striped">
       <thead>
         <tr>
           <th>Timestamp</th>
-          <th>Rule Level</th>
+          <th class="sortable" id="sort-level">Rule Level ▲▼</th>
           <th>Agent ID</th>
           <th>Agent Name</th>
           <th>Description</th>
         </tr>
       </thead>
-      <tbody id="alerts-table">
-        <!-- Alerts Go Here -->
-      </tbody>
+      <tbody id="alerts-table"></tbody>
     </table>
+  </div>
+
+  <div class="d-flex justify-content-between align-items-center mt-3">
+    <button class="btn btn-secondary" id="prev-page">Previous</button>
+    <span id="page-info"></span>
+    <button class="btn btn-secondary" id="next-page">Next</button>
   </div>
 </div>
 
 <script>
-const API_BASE = 'https://wazuhapiv2.onrender.com'; // Replace with your actual deployed FastAPI URL
+const API_BASE = 'https://wazuhapiv2.onrender.com';
+let currentPage = 1;
+let agentFilter = '';
+let startDate = '';
+let endDate = '';
+let sortAsc = true;
+let alertsData = [];
+let levelFilter = '';
+const pageSize = 20;
+
+function getLevelColor(level) {
+  if (level >= 10) return 'danger';
+  if (level >= 7) return 'warning';
+  if (level >= 4) return 'primary';
+  if (level >= 1) return 'info';
+  return 'secondary';
+}
+
+function getLevelLabel(level) {
+  if (level >= 10) return 'Critical';
+  if (level >= 7) return 'High';
+  if (level >= 4) return 'Medium';
+  if (level >= 1) return 'Low';
+  return 'Info';
+}
+
+function matchesLevel(level, filter) {
+  if (!filter) return true;
+  const label = getLevelLabel(level).toLowerCase();
+  return label === filter.toLowerCase();
+}
 
 async function fetchSummary() {
   const res = await fetch(`${API_BASE}/alerts/summary?timeframe=24h`);
   const data = await res.json();
   const container = document.getElementById('summary-cards');
   container.innerHTML = '';
-
+  const levelCounts = { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 };
   data.summary.forEach(s => {
+    const label = getLevelLabel(s.rule_level);
+    levelCounts[label] += s.count;
+  });
+  Object.entries(levelCounts).forEach(([label, count]) => {
+    const color = getLevelColor(label === 'Critical' ? 10 : label === 'High' ? 7 : label === 'Medium' ? 4 : label === 'Low' ? 1 : 0);
     const card = document.createElement('div');
-    card.className = 'col-md-3';
-    card.innerHTML = `
-      <div class="card text-white bg-${getLevelColor(s.rule_level)}">
-        <div class="card-body">
-          <h5 class="card-title">Level ${s.rule_level}</h5>
-          <p class="card-text">${s.count} Alerts</p>
-        </div>
-      </div>`;
+    card.className = 'col-md-2';
+    card.innerHTML = `<div class="card text-white bg-${color}"><div class="card-body"><h5 class="card-title">${label}</h5><p class="card-text">${count} Alerts</p></div></div>`;
     container.appendChild(card);
   });
 }
 
 async function fetchAlerts() {
-  const res = await fetch(`${API_BASE}/alerts?limit=20`);
+  let url = `${API_BASE}/alerts?limit=1000`;
+  if (agentFilter) url += `&agent_name=${encodeURIComponent(agentFilter)}`;
+  if (startDate) url += `&start_time=${startDate}T00:00:00Z`;
+  if (endDate) url += `&end_time=${endDate}T23:59:59Z`;
+  const res = await fetch(url);
   const data = await res.json();
-  const tbody = document.getElementById('alerts-table');
-  tbody.innerHTML = '';
-
-  data.alerts.forEach(alert => {
-    const row = document.createElement('tr');
-    row.innerHTML = `
-      <td>${new Date(alert.timestamp).toLocaleString()}</td>
-      <td>${alert.rule?.level ?? ''}</td>
-      <td>${alert.agent?.id ?? ''}</td>
-      <td>${alert.agent?.name ?? ''}</td>
-      <td>${alert.rule?.description ?? 'No description'}</td>`;
-    tbody.appendChild(row);
-  });
+  alertsData = data.alerts;
+  renderAlerts();
 }
 
-function getLevelColor(level) {
-  if (level >= 10) return 'danger';
-  if (level >= 6) return 'warning';
-  if (level >= 3) return 'primary';
-  return 'secondary';
+function renderAlerts() {
+  const tbody = document.getElementById('alerts-table');
+  tbody.innerHTML = '';
+  let sortedData = alertsData.slice();
+  sortedData.sort((a, b) => {
+    const levelA = a.rule?.level || 0;
+    const levelB = b.rule?.level || 0;
+    return sortAsc ? levelA - levelB : levelB - levelA;
+  });
+  const filtered = sortedData.filter(alert => matchesLevel(alert.rule?.level || 0, levelFilter));
+  const paginated = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  paginated.forEach(alert => {
+    const level = alert.rule?.level || 0;
+    const row = document.createElement('tr');
+    row.innerHTML = `<td>${new Date(alert.timestamp).toLocaleString()}</td><td>${level} <span class="badge bg-${getLevelColor(level)}">${getLevelLabel(level)}</span></td><td>${alert.agent?.id ?? ''}</td><td>${alert.agent?.name ?? ''}</td><td>${alert.rule?.description ?? 'No description'}</td>`;
+    tbody.appendChild(row);
+  });
+  document.getElementById('page-info').innerText = `Page ${currentPage}`;
 }
 
 fetchSummary();
 fetchAlerts();
-</script>
 
+['agent-name', 'start-date', 'end-date', 'level-filter'].forEach(id => {
+  document.getElementById(id).addEventListener('change', () => {
+    agentFilter = document.getElementById('agent-name').value;
+    startDate = document.getElementById('start-date').value;
+    endDate = document.getElementById('end-date').value;
+    levelFilter = document.getElementById('level-filter').value;
+    currentPage = 1;
+    fetchAlerts();
+  });
+});
+
+document.getElementById('prev-page').addEventListener('click', () => {
+  if (currentPage > 1) {
+    currentPage--;
+    renderAlerts();
+  }
+});
+
+document.getElementById('next-page').addEventListener('click', () => {
+  currentPage++;
+  renderAlerts();
+});
+
+document.getElementById('sort-level').addEventListener('click', () => {
+  sortAsc = !sortAsc;
+  renderAlerts();
+});
+</script>
 </body>
 </html>
