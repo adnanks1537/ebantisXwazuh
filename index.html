@@ -53,7 +53,7 @@
       <thead>
         <tr>
           <th>Timestamp</th>
-          <th class="sortable" id="sort-level">Rule Level ▲▼</th>
+          <th class="sortable" id="sort-level">Rule Level</th>
           <th>Agent ID</th>
           <th>Agent Name</th>
           <th>Description</th>
@@ -138,7 +138,7 @@ async function fetchSummary() {
     const color = getLevelColor(label === 'Critical' ? 10 : label === 'High' ? 7 : label === 'Medium' ? 4 : label === 'Low' ? 1 : 0);
     const card = document.createElement('div');
     card.className = 'col-md-2';
-    card.innerHTML = `<div class="card text-white bg-${color}"><div class="card-body"><h5 class="card-title">${label}</h5><p class="card-text">${count} Alerts</p></div></div>`;
+    card.innerHTML = `<div class="card text-white bg-${color}"><div class="card-body"><h5 class="card-title"><i class="bi bi-shield-lock"></i> ${label}</h5><p class="card-text">${count} Alerts</p></div></div>`;
     container.appendChild(card);
   });
 }
@@ -165,6 +165,11 @@ function renderAlerts() {
   });
   const filtered = sortedData.filter(alert => matchesLevel(alert.rule?.level || 0, levelFilter));
   const paginated = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  if (paginated.length === 0) {
+    const row = document.createElement('tr');
+    row.innerHTML = `<td colspan="6" class="text-center">No alerts found for the selected criteria.</td>`;
+    tbody.appendChild(row);
+  }
   paginated.forEach((alert, index) => {
     const level = alert.rule?.level || 0;
     const alertId = `alert-${index}`;
@@ -183,7 +188,10 @@ function renderAlerts() {
     detailsRow.innerHTML = `<td colspan="6" class="p-0"><div class="collapse" id="${alertId}"><div class="card card-body alert-box bg-light border">${formatAlertDetails(alert.event)}</div></div></td>`;
     tbody.appendChild(detailsRow);
   });
-  document.getElementById('page-info').innerText = `Page ${currentPage}`;
+  document.getElementById('page-info').innerText = `Page ${currentPage} of ${Math.ceil(filtered.length / pageSize)} (${filtered.length} alerts)`;
+  document.getElementById('prev-page').disabled = currentPage <= 1;
+  document.getElementById('next-page').disabled = currentPage >= Math.ceil(filtered.length / pageSize);
+  document.getElementById('sort-level').innerText = `Rule Level ${sortAsc ? '▲' : '▼'}`;
 }
 
 function exportToCSV() {
