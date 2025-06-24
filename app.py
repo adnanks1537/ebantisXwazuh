@@ -1,7 +1,6 @@
 import os
 import logging
 import json
-import ssl
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -54,12 +53,10 @@ if not MONGO_URI:
 )
 def get_mongo_client():
     try:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
         client = MongoClient(
             MONGO_URI,
-            ssl=True,
-            ssl_ca_certs=certifi.where(),
-            ssl_context=context,
+            tls=True,
+            tlsCAFile=certifi.where(),
             serverSelectionTimeoutMS=30000,
             socketTimeoutMS=30000,
             connectTimeoutMS=30000
