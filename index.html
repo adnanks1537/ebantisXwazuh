@@ -5,16 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SIEM Alert Dashboard</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
   <style>
     body { background-color: #f8f9fa; }
     .card { margin-bottom: 20px; }
     .alert-box { white-space: pre-wrap; }
     th.sortable { cursor: pointer; }
+    .btn-eye { padding: 0.25rem 0.5rem; font-size: 0.85rem; }
+    #export-btn { margin-bottom: 10px; }
   </style>
 </head>
 <body>
 <div class="container py-4">
-  <h1 class="mb-4">SIEM Alert Dashboard</h1>
+  <h1 class="mb-4 d-flex justify-content-between align-items-center">
+    SIEM Alert Dashboard
+    <button class="btn btn-success" id="export-btn"><i class="bi bi-download"></i> Export CSV</button>
+  </h1>
 
   <div class="row" id="summary-cards"></div>
 
@@ -51,6 +57,7 @@
           <th>Agent ID</th>
           <th>Agent Name</th>
           <th>Description</th>
+          <th>Details</th>
         </tr>
       </thead>
       <tbody id="alerts-table"></tbody>
@@ -65,7 +72,7 @@
 </div>
 
 <script>
-const API_BASE = 'https://wazuhapiv2.onrender.com';
+const API_BASE = 'https://wazuhapiv3.onrender.com';
 let currentPage = 1;
 let agentFilter = '';
 let startDate = '';
@@ -95,6 +102,26 @@ function matchesLevel(level, filter) {
   if (!filter) return true;
   const label = getLevelLabel(level).toLowerCase();
   return label === filter.toLowerCase();
+}
+
+function formatAlertDetails(event) {
+  if (!event) return 'No additional details available.';
+  const keysToShow = ['srcip', 'srcport', 'dstip', 'dstport', 'user', 'protocol', 'data', 'location', 'status'];
+  let html = '<strong>Alert Details:</strong><ul>';
+  keysToShow.forEach(key => {
+    if (event[key]) {
+      html += `<li><strong>${key}:</strong> ${event[key]}</li>`;
+    }
+  });
+  if (event.data && typeof event.data === 'object') {
+    html += '<li><strong>Data:</strong><ul>';
+    for (const [k, v] of Object.entries(event.data)) {
+      html += `<li><strong>${k}:</strong> ${v}</li>`;
+    }
+    html += '</ul></li>';
+  }
+  html += '</ul>';
+  return html;
 }
 
 async function fetchSummary() {
@@ -138,14 +165,48 @@ function renderAlerts() {
   });
   const filtered = sortedData.filter(alert => matchesLevel(alert.rule?.level || 0, levelFilter));
   const paginated = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  paginated.forEach(alert => {
+  paginated.forEach((alert, index) => {
     const level = alert.rule?.level || 0;
+    const alertId = `alert-${index}`;
     const row = document.createElement('tr');
-    row.innerHTML = `<td>${new Date(alert.timestamp).toLocaleString()}</td><td>${level} <span class="badge bg-${getLevelColor(level)}">${getLevelLabel(level)}</span></td><td>${alert.agent?.id ?? ''}</td><td>${alert.agent?.name ?? ''}</td><td>${alert.rule?.description ?? 'No description'}</td>`;
+    row.innerHTML = `
+      <td>${new Date(alert.timestamp).toLocaleString()}</td>
+      <td>${level} <span class="badge bg-${getLevelColor(level)}">${getLevelLabel(level)}</span></td>
+      <td>${alert.agent?.id ?? ''}</td>
+      <td>${alert.agent?.name ?? ''}</td>
+      <td>${alert.rule?.description ?? 'No description'}</td>
+      <td><button class="btn btn-sm btn-outline-primary btn-eye" data-bs-toggle="collapse" data-bs-target="#${alertId}" aria-expanded="false" aria-controls="${alertId}"><i class="bi bi-eye"></i></button></td>
+    `;
     tbody.appendChild(row);
+
+    const detailsRow = document.createElement('tr');
+    detailsRow.innerHTML = `<td colspan="6" class="p-0"><div class="collapse" id="${alertId}"><div class="card card-body alert-box bg-light border">${formatAlertDetails(alert.event)}</div></div></td>`;
+    tbody.appendChild(detailsRow);
   });
   document.getElementById('page-info').innerText = `Page ${currentPage}`;
 }
+
+function exportToCSV() {
+  const headers = ['Timestamp', 'Rule Level', 'Level Label', 'Agent ID', 'Agent Name', 'Description'];
+  const rows = alertsData.map(alert => [
+    new Date(alert.timestamp).toLocaleString(),
+    alert.rule?.level || 0,
+    getLevelLabel(alert.rule?.level || 0),
+    alert.agent?.id ?? '',
+    alert.agent?.name ?? '',
+    alert.rule?.description ?? 'No description'
+  ]);
+  let csvContent = "data:text/csv;charset=utf-8," + [headers, ...rows].map(e => e.join(",")).join("\n");
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement("a");
+  link.setAttribute("href", encodedUri);
+  link.setAttribute("download", "alerts.csv");
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+document.getElementById('export-btn').addEventListener('click', exportToCSV);
 
 fetchSummary();
 fetchAlerts();
