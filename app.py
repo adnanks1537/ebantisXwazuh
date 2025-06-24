@@ -5,13 +5,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
-from motor.motor_asyncio import AsyncIOMotorClient
-from bson import ObjectId
+import motor.motor_asyncio
 import uvicorn
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# MongoDB connection (hardcoded)
+MONGO_URI = "mongodb+srv://zyra:Adnan%4066202@wazuhxebantisserver.oj0snuz.mongodb.net/?retryWrites=true&w=majority&appName=WazuhXEbantisServer"
+mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True)
+db = mongo_client["wazuh"]
+alerts_collection = db["alerts"]
 
 # FastAPI app
 app = FastAPI(
@@ -25,7 +30,7 @@ origins = [
     "http://localhost:3000",
     "https://your-frontend.com",
     "https://98.70.144.86:55000",
-    "*"  # Remove in production
+    "*"
 ]
 
 app.add_middleware(
@@ -36,13 +41,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB Setup
-MONGO_URI = "mongodb+srv://zyra:Adnan%4066202@wazuhxebantisserver.oj0snuz.mongodb.net/?retryWrites=true&w=majority&appName=WazuhXEbantisServer"
-client = AsyncIOMotorClient(MONGO_URI)
-db = client["wazuh"]
-alerts_collection = db["alerts"]
-
-# Pydantic models for input validation
+# Pydantic models
 class AlertQuery(BaseModel):
     limit: Optional[int] = 10
     offset: Optional[int] = 0
@@ -55,10 +54,10 @@ class SummaryQuery(BaseModel):
 class AgentQuery(BaseModel):
     limit: Optional[int] = 10
     offset: Optional[int] = 0
-    status: Optional[str] = None  # not used
+    status: Optional[str] = None
 
-# Endpoint: Receive Wazuh alerts
-@app.post("/wazuh-alerts", summary="Receive alerts from Wazuh")
+# POST: Receive Wazuh alert
+@app.post("/wazuh-alerts")
 async def receive_alert(alert: Dict[Any, Any]):
     try:
         timestamp_str = alert.get("timestamp")
@@ -67,112 +66,106 @@ async def receive_alert(alert: Dict[Any, Any]):
 
         try:
             timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f+0000")
-        except (ValueError, TypeError) as e:
-            logger.error(f"Invalid timestamp: {timestamp_str}, error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Invalid timestamp: {timestamp_str}")
             raise HTTPException(status_code=400, detail="Invalid timestamp format")
 
-        db_alert = {
+        alert_doc = {
             "timestamp": timestamp,
-            "rule_id": rule.get("id", ""),
-            "rule_description": rule.get("description", ""),
-            "rule_level": rule.get("level", 0),
-            "agent_id": agent.get("id", ""),
-            "agent_name": agent.get("name", ""),
-            "event": alert  # store full JSON
+            "rule": {
+                "id": rule.get("id", ""),
+                "description": rule.get("description", ""),
+                "level": rule.get("level", 0)
+            },
+            "agent": {
+                "id": agent.get("id", ""),
+                "name": agent.get("name", "")
+            },
+            "event": alert
         }
 
-        await alerts_collection.insert_one(db_alert)
-        logger.info(f"Stored alert: rule_id={rule.get('id')}, timestamp={timestamp_str}")
+        await alerts_collection.insert_one(alert_doc)
+        logger.info(f"Alert stored: {rule.get('id')}")
         return {"status": "success"}
-    except Exception as e:
-        logger.error(f"Error processing alert: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to store alert")
 
-# Endpoint: Fetch stored alerts
-@app.get("/alerts", summary="Fetch stored Wazuh alerts")
-async def get_alerts(
-    limit: int = Query(10, ge=1),
-    offset: int = Query(0, ge=0),
-    rule_level: Optional[int] = None,
-    agent_id: Optional[str] = None
-):
+    except Exception as e:
+        logger.error(f"Error processing alert: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# GET: Fetch alerts
+@app.get("/alerts")
+async def get_alerts(limit: int = 10, offset: int = 0, rule_level: Optional[int] = None, agent_id: Optional[str] = None):
     try:
         query = {}
         if rule_level is not None:
-            query["rule_level"] = {"$gte": rule_level}
+            query["rule.level"] = {"$gte": rule_level}
         if agent_id:
-            query["agent_id"] = agent_id
+            query["agent.id"] = agent_id
 
         total = await alerts_collection.count_documents(query)
-        cursor = alerts_collection.find(query).skip(offset).limit(limit).sort("timestamp", -1)
-        results = []
+        cursor = alerts_collection.find(query).sort("timestamp", -1).skip(offset).limit(limit)
+        alerts = []
         async for doc in cursor:
-            results.append({
+            alerts.append({
                 "timestamp": doc["timestamp"].isoformat(),
-                "rule": {
-                    "id": doc.get("rule_id"),
-                    "description": doc.get("rule_description"),
-                    "level": doc.get("rule_level")
-                },
-                "agent": {
-                    "id": doc.get("agent_id"),
-                    "name": doc.get("agent_name")
-                },
-                "event": doc.get("event")
+                "rule": doc["rule"],
+                "agent": doc["agent"],
+                "event": doc["event"]
             })
 
-        return {"alerts": results, "total": total}
-    except Exception as e:
-        logger.error(f"Error fetching alerts: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to fetch alerts")
+        return {"alerts": alerts, "total": total}
 
-# Endpoint: Alerts summary by rule level
-@app.get("/alerts/summary", summary="Fetch alerts summary")
-async def get_alerts_summary(timeframe: Optional[str] = None):
+    except Exception as e:
+        logger.error(f"Error fetching alerts: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# GET: Alerts summary
+@app.get("/alerts/summary")
+async def get_alerts_summary(timeframe: Optional[str] = Query(None)):
     try:
-        match_stage = {}
+        query = {}
         if timeframe:
             hours = int(timeframe.replace("h", ""))
             time_threshold = datetime.utcnow() - timedelta(hours=hours)
-            match_stage = {"timestamp": {"$gte": time_threshold}}
+            query["timestamp"] = {"$gte": time_threshold}
 
         pipeline = [
-            {"$match": match_stage},
-            {"$group": {
-                "_id": "$rule_level",
-                "count": {"$sum": 1}
-            }}
+            {"$match": query},
+            {"$group": {"_id": "$rule.level", "count": {"$sum": 1}}}
         ]
-
         summary = await alerts_collection.aggregate(pipeline).to_list(length=None)
+
         return {
             "summary": [{"rule_level": doc["_id"], "count": doc["count"]} for doc in summary],
             "total": len(summary)
         }
-    except Exception as e:
-        logger.error(f"Error fetching summary: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to fetch summary")
 
-# Endpoint: Fetch agents list
-@app.get("/agents", summary="Fetch agent information from alerts")
+    except Exception as e:
+        logger.error(f"Error fetching summary: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# GET: Agent info
+@app.get("/agents")
 async def get_agents(limit: int = 10, offset: int = 0):
     try:
         pipeline = [
-            {"$group": {
-                "_id": {"agent_id": "$agent_id", "agent_name": "$agent_name"}
-            }},
+            {
+                "$group": {
+                    "_id": {"id": "$agent.id", "name": "$agent.name"}
+                }
+            },
             {"$skip": offset},
             {"$limit": limit}
         ]
-
         agents = await alerts_collection.aggregate(pipeline).to_list(length=None)
         return {
-            "agents": [{"id": a["_id"]["agent_id"], "name": a["_id"]["agent_name"]} for a in agents],
+            "agents": [{"id": agent["_id"]["id"], "name": agent["_id"]["name"]} for agent in agents],
             "total": len(agents)
         }
+
     except Exception as e:
-        logger.error(f"Error fetching agents: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to fetch agents")
+        logger.error(f"Error fetching agents: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000)
