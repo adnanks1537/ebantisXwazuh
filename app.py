@@ -12,7 +12,7 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# MongoDB connection (hardcoded)
+# MongoDB connection
 MONGO_URI = "mongodb+srv://zyra:Adnan%4066202@wazuhxebantisserver.oj0snuz.mongodb.net/?retryWrites=true&w=majority&appName=WazuhXEbantisServer"
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True)
 db = mongo_client["wazuh"]
@@ -25,36 +25,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration
-origins = [
-    "http://localhost:3000",
-    "https://your-frontend.com",
-    "https://98.70.144.86:55000",
-    "*"
-]
-
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*", "http://localhost:3000", "https://your-frontend.com", "https://98.70.144.86:55000"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-# Pydantic models
-class AlertQuery(BaseModel):
-    limit: Optional[int] = 10
-    offset: Optional[int] = 0
-    rule_level: Optional[int] = None
-    agent_id: Optional[str] = None
-
-class SummaryQuery(BaseModel):
-    timeframe: Optional[str] = None  # e.g., "24h"
-
-class AgentQuery(BaseModel):
-    limit: Optional[int] = 10
-    offset: Optional[int] = 0
-    status: Optional[str] = None
 
 # POST: Receive Wazuh alert
 @app.post("/wazuh-alerts")
@@ -63,10 +41,16 @@ async def receive_alert(alert: Dict[Any, Any]):
         timestamp_str = alert.get("timestamp")
         rule = alert.get("rule", {})
         agent = alert.get("agent", {})
+        rule_level = rule.get("level", 0)
+
+        # Skip storing alerts with level < 4
+        if rule_level < 4:
+            logger.info(f"Ignored alert with level {rule_level}")
+            return {"status": "ignored", "reason": "low-level alert"}
 
         try:
             timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f+0000")
-        except Exception as e:
+        except Exception:
             logger.error(f"Invalid timestamp: {timestamp_str}")
             raise HTTPException(status_code=400, detail="Invalid timestamp format")
 
@@ -75,7 +59,7 @@ async def receive_alert(alert: Dict[Any, Any]):
             "rule": {
                 "id": rule.get("id", ""),
                 "description": rule.get("description", ""),
-                "level": rule.get("level", 0)
+                "level": rule_level
             },
             "agent": {
                 "id": agent.get("id", ""),
@@ -85,7 +69,7 @@ async def receive_alert(alert: Dict[Any, Any]):
         }
 
         await alerts_collection.insert_one(alert_doc)
-        logger.info(f"Alert stored: {rule.get('id')}")
+        logger.info(f"Stored alert: Rule ID {rule.get('id')} with level {rule_level}")
         return {"status": "success"}
 
     except Exception as e:
