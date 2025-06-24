@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import ssl
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,6 +10,7 @@ from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 from datetime import datetime, timedelta
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import certifi
 import uvicorn
 
 # Configure logging
@@ -25,8 +27,8 @@ app = FastAPI(
 # CORS configuration
 origins = [
     "http://localhost:3000",
-    "https://your-frontend.com",  # Replace with your front-end domain
-    "https://98.70.144.86:55000",
+    "https://your-frontend.com",
+    "https://98.172.144.86:55000",
     "*"  # Remove in production
 ]
 
@@ -52,13 +54,15 @@ if not MONGO_URI:
 )
 def get_mongo_client():
     try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
         client = MongoClient(
             MONGO_URI,
-            tls=True,
-            tlsAllowInvalidCertificates=False,
-            serverSelectionTimeoutMS=20000,
-            socketTimeoutMS=20000,
-            connectTimeoutMS=20000
+            ssl=True,
+            ssl_ca_certs=certifi.where(),
+            ssl_context=context,
+            serverSelectionTimeoutMS=30000,
+            socketTimeoutMS=30000,
+            connectTimeoutMS=30000
         )
         # Test connection
         client.admin.command("ping")
