@@ -6,7 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 from datetime import datetime, timedelta
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import uvicorn
 
 # Configure logging
@@ -41,9 +43,38 @@ MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     logger.error("MONGO_URI environment variable not set")
     raise RuntimeError("MONGO_URI not set")
-client = MongoClient(MONGO_URI)
-db = client["wazuh_alerts"]  # Database: wazuh_alerts
-alerts_collection = db["alerts"]  # Collection: alerts
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((ConnectionFailure, ServerSelectionTimeoutError)),
+    before_sleep=lambda retry_state: logger.warning(f"Retrying MongoDB connection: attempt {retry_state.attempt_number}")
+)
+def get_mongo_client():
+    try:
+        client = MongoClient(
+            MONGO_URI,
+            tls=True,
+            tlsAllowInvalidCertificates=False,
+            serverSelectionTimeoutMS=20000,
+            socketTimeoutMS=20000,
+            connectTimeoutMS=20000
+        )
+        # Test connection
+        client.admin.command("ping")
+        logger.info("Successfully connected to MongoDB")
+        return client
+    except Exception as e:
+        logger.error(f"Failed to connect to MongoDB: {str(e)}")
+        raise
+
+try:
+    client = get_mongo_client()
+    db = client["wazuh_alerts"]  # Database: wazuh_alerts
+    alerts_collection = db["alerts"]  # Collection: alerts
+except Exception as e:
+    logger.critical(f"Cannot initialize MongoDB client: {str(e)}")
+    raise
 
 # Pydantic models for API
 class AlertQuery(BaseModel):
