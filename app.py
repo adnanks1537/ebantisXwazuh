@@ -43,7 +43,6 @@ async def receive_alert(alert: Dict[Any, Any]):
         agent = alert.get("agent", {})
         rule_level = rule.get("level", 0)
 
-        # Skip storing alerts with level < 4
         if rule_level < 4:
             logger.info(f"Ignored alert with level {rule_level}")
             return {"status": "ignored", "reason": "low-level alert"}
@@ -76,15 +75,35 @@ async def receive_alert(alert: Dict[Any, Any]):
         logger.error(f"Error processing alert: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# GET: Fetch alerts
+# GET: Fetch alerts with filters
 @app.get("/alerts")
-async def get_alerts(limit: int = 10, offset: int = 0, rule_level: Optional[int] = None, agent_id: Optional[str] = None):
+async def get_alerts(
+    limit: int = 10,
+    offset: int = 0,
+    rule_level: Optional[int] = None,
+    agent_id: Optional[str] = None,
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None)
+):
     try:
         query = {}
+
         if rule_level is not None:
             query["rule.level"] = {"$gte": rule_level}
         if agent_id:
             query["agent.id"] = agent_id
+        if start_time:
+            try:
+                start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                query.setdefault("timestamp", {})["$gte"] = start_dt
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid start_time format. Use ISO 8601.")
+        if end_time:
+            try:
+                end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+                query.setdefault("timestamp", {})["$lte"] = end_dt
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid end_time format. Use ISO 8601.")
 
         total = await alerts_collection.count_documents(query)
         cursor = alerts_collection.find(query).sort("timestamp", -1).skip(offset).limit(limit)
