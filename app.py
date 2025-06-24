@@ -1,4 +1,3 @@
-import os
 import logging
 import json
 from fastapi import FastAPI, HTTPException
@@ -27,7 +26,7 @@ app = FastAPI(
 origins = [
     "http://localhost:3000",
     "https://your-frontend.com",
-    "https://98.172.144.86",
+    "https://98.172.144.86:55000",
     "*"  # Remove in production
 ]
 
@@ -40,10 +39,7 @@ app.add_middleware(
 )
 
 # MongoDB setup
-MONGO_URI = "mongodb+srv://zyra:Adnan%4066202@wazuhxebantisserver.oj0snuz.mongodb.net/"
-if not MONGO_URI:
-    logger.error("MONGO_URI environment variable not set")
-    raise RuntimeError("MONGO_URI not set")
+MONGO_URI = "mongodb+srv://zyra:Adnan%4066202@wazuhxebantisserver.oj0snuz.mongodb.net/?retryWrites=true&w=majority&appName=WazuhXEbantisServer"
 
 @retry(
     stop=stop_after_attempt(3),
@@ -63,7 +59,7 @@ def get_mongo_client():
         )
         # Test connection
         client.admin.command("ping")
-        logger.info("Successfully connected to MongoDB")
+        logger.info("Successfully connected to MongoDB Atlas")
         return client
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {str(e)}")
@@ -99,22 +95,17 @@ class AgentQuery(BaseModel):
 )
 async def receive_alert(alert: Dict[Any, Any]):
     try:
-        # Log raw alert for debugging
         logger.debug(f"Received raw alert: {alert}")
-
-        # Extract required fields
         timestamp_str = alert.get("timestamp")
         rule = alert.get("rule", {})
         agent = alert.get("agent", {})
 
-        # Parse timestamp (handle +0000 format)
         try:
             timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f+0000")
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid timestamp format: {timestamp_str}, error: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {timestamp_str}")
 
-        # Create document
         db_alert = {
             "timestamp": timestamp,
             "rule_id": rule.get("id", ""),
@@ -122,7 +113,7 @@ async def receive_alert(alert: Dict[Any, Any]):
             "rule_level": rule.get("level", 0),
             "agent_id": agent.get("id", ""),
             "agent_name": agent.get("name", ""),
-            "event": json.dumps(alert)  # Store full alert as JSON string
+            "event": json.dumps(alert)
         }
         alerts_collection.insert_one(db_alert)
         logger.info(f"Stored alert: rule_id={rule.get('id')}, timestamp={timestamp_str}, agent_id={agent.get('id')}")
@@ -138,19 +129,16 @@ async def receive_alert(alert: Dict[Any, Any]):
 )
 async def get_alerts(query: AlertQuery = AlertQuery()):
     try:
-        # Build query
         mongo_query = {}
         if query.rule_level is not None:
             mongo_query["rule_level"] = {"$gte": query.rule_level}
         if query.agent_id:
             mongo_query["agent_id"] = query.agent_id
 
-        # Fetch alerts
         cursor = alerts_collection.find(mongo_query).skip(query.offset).limit(query.limit)
         alerts = list(cursor)
         total = alerts_collection.count_documents(mongo_query)
 
-        # Format response
         return {
             "alerts": [
                 {
@@ -180,29 +168,16 @@ async def get_alerts(query: AlertQuery = AlertQuery()):
 )
 async def get_alerts_summary(query: SummaryQuery = SummaryQuery()):
     try:
-        # Build query
         mongo_query = {}
         if query.timeframe:
             hours = int(query.timeframe.replace("h", ""))
             time_threshold = datetime.utcnow() - timedelta(hours=hours)
             mongo_query["timestamp"] = {"$gte": time_threshold}
 
-        # Aggregate by rule_level
         pipeline = [
             {"$match": mongo_query},
-            {
-                "$group": {
-                    "_id": "$rule_level",
-                    "count": {"$sum": 1}
-                }
-            },
-            {
-                "$project": {
-                    "rule_level": "$_id",
-                    "count": 1,
-                    "_id": 0
-                }
-            }
+            {"$group": {"_id": "$rule_level", "count": {"$sum": 1}}},
+            {"$project": {"rule_level": "$_id", "count": 1, "_id": 0}}
         ]
         summary = list(alerts_collection.aggregate(pipeline))
         return {
@@ -220,23 +195,9 @@ async def get_alerts_summary(query: SummaryQuery = SummaryQuery()):
 )
 async def get_agents(query: AgentQuery = AgentQuery()):
     try:
-        # Aggregate distinct agents
         pipeline = [
-            {
-                "$group": {
-                    "_id": {
-                        "agent_id": "$agent_id",
-                        "agent_name": "$agent_name"
-                    }
-                }
-            },
-            {
-                "$project": {
-                    "agent_id": "$_id.agent_id",
-                    "agent_name": "$_id.agent_name",
-                    "_id": 0
-                }
-            },
+            {"$group": {"_id": {"agent_id": "$agent_id", "agent_name": "$agent_name"}}},
+            {"$project": {"agent_id": "$_id.agent_id", "agent_name": "$_id.agent_name", "_id": 0}},
             {"$skip": query.offset},
             {"$limit": query.limit}
         ]
@@ -247,9 +208,7 @@ async def get_agents(query: AgentQuery = AgentQuery()):
             logger.warning("Agent status filter not supported in this implementation")
 
         return {
-            "agents": [
-                {"id": a["agent_id"], "name": a["agent_name"]} for a in agents
-            ],
+            "agents": [{"id": a["agent_id"], "name": a["agent_name"]} for a in agents],
             "total": total
         }
     except Exception as e:
