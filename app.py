@@ -40,7 +40,7 @@ app.add_middleware(
 )
 
 # MongoDB setup
-MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI = "mongodb+srv://zyra:Adnan%4066202@wazuhxebantisserver.oj0snuz.mongodb.net/"
 if not MONGO_URI:
     logger.error("MONGO_URI environment variable not set")
     raise RuntimeError("MONGO_URI not set")
