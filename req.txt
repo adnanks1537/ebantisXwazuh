@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-pymongo>=4.6.0
-python-dotenv
-tenacity
-certifi
+pymongo
+motor
+
