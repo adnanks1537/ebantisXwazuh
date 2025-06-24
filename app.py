@@ -1,13 +1,11 @@
 import os
 import logging
 import json
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from pymongo import MongoClient
 from datetime import datetime, timedelta
 import uvicorn
 
@@ -38,34 +36,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# SQLite database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///wazuh_alerts.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# Database model for alerts
-class Alert(Base):
-    __tablename__ = "alerts"
-    id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime)
-    rule_id = Column(String)
-    rule_description = Column(String)
-    rule_level = Column(Integer)
-    agent_id = Column(String)
-    agent_name = Column(String)
-    event = Column(Text)  # Full JSON alert as text
-
-# Create database tables
-Base.metadata.create_all(bind=engine)
-
-# Dependency for database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# MongoDB setup
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    logger.error("MONGO_URI environment variable not set")
+    raise RuntimeError("MONGO_URI not set")
+client = MongoClient(MONGO_URI)
+db = client["wazuh_alerts"]  # Database: wazuh_alerts
+alerts_collection = db["alerts"]  # Collection: alerts
 
 # Pydantic models for API
 class AlertQuery(BaseModel):
@@ -87,7 +65,7 @@ class AgentQuery(BaseModel):
     "/wazuh-alerts",
     summary="Receive alerts from Wazuh"
 )
-async def receive_alert(alert: Dict[Any, Any], db: Session = Depends(get_db)):
+async def receive_alert(alert: Dict[Any, Any]):
     try:
         # Log raw alert for debugging
         logger.debug(f"Received raw alert: {alert}")
@@ -104,19 +82,18 @@ async def receive_alert(alert: Dict[Any, Any], db: Session = Depends(get_db)):
             logger.error(f"Invalid timestamp format: {timestamp_str}, error: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {timestamp_str}")
 
-        # Create database entry
-        db_alert = Alert(
-            timestamp=timestamp,
-            rule_id=rule.get("id", ""),
-            rule_description=rule.get("description", ""),
-            rule_level=rule.get("level", 0),
-            agent_id=agent.get("id", ""),
-            agent_name=agent.get("name", ""),
-            event=json.dumps(alert)  # Store full alert as JSON string
-        )
-        db.add(db_alert)
-        db.commit()
-        logger.info(f"Stored alert: rule_id={rule.get('id')}, timestamp={timestamp_str}")
+        # Create document
+        db_alert = {
+            "timestamp": timestamp,
+            "rule_id": rule.get("id", ""),
+            "rule_description": rule.get("description", ""),
+            "rule_level": rule.get("level", 0),
+            "agent_id": agent.get("id", ""),
+            "agent_name": agent.get("name", ""),
+            "event": json.dumps(alert)  # Store full alert as JSON string
+        }
+        alerts_collection.insert_one(db_alert)
+        logger.info(f"Stored alert: rule_id={rule.get('id')}, timestamp={timestamp_str}, agent_id={agent.get('id')}")
         return {"status": "success"}
     except Exception as e:
         logger.error(f"Error processing alert: {str(e)}, alert={alert}")
@@ -127,24 +104,35 @@ async def receive_alert(alert: Dict[Any, Any], db: Session = Depends(get_db)):
     "/alerts",
     summary="Fetch stored Wazuh alerts"
 )
-async def get_alerts(query: AlertQuery = Depends(), db: Session = Depends(get_db)):
+async def get_alerts(query: AlertQuery = AlertQuery()):
     try:
-        db_query = db.query(Alert)
-        if query.rule_level:
-            db_query = db_query.filter(Alert.rule_level >= query.rule_level)
+        # Build query
+        mongo_query = {}
+        if query.rule_level is not None:
+            mongo_query["rule_level"] = {"$gte": query.rule_level}
         if query.agent_id:
-            db_query = db_query.filter(Alert.agent_id == query.agent_id)
-        
-        total = db_query.count()
-        alerts = db_query.offset(query.offset).limit(query.limit).all()
-        
+            mongo_query["agent_id"] = query.agent_id
+
+        # Fetch alerts
+        cursor = alerts_collection.find(mongo_query).skip(query.offset).limit(query.limit)
+        alerts = list(cursor)
+        total = alerts_collection.count_documents(mongo_query)
+
+        # Format response
         return {
             "alerts": [
                 {
-                    "timestamp": a.timestamp.isoformat(),
-                    "rule": {"id": a.rule_id, "description": a.rule_description, "level": a.rule_level},
-                    "agent": {"id": a.agent_id, "name": a.agent_name},
-                    "event": a.event
+                    "timestamp": a["timestamp"].isoformat(),
+                    "rule": {
+                        "id": a["rule_id"],
+                        "description": a["rule_description"],
+                        "level": a["rule_level"]
+                    },
+                    "agent": {
+                        "id": a["agent_id"],
+                        "name": a["agent_name"]
+                    },
+                    "event": a["event"]
                 } for a in alerts
             ],
             "total": total
@@ -158,21 +146,35 @@ async def get_alerts(query: AlertQuery = Depends(), db: Session = Depends(get_db
     "/alerts/summary",
     summary="Fetch alerts summary"
 )
-async def get_alerts_summary(query: SummaryQuery = Depends(), db: Session = Depends(get_db)):
+async def get_alerts_summary(query: SummaryQuery = SummaryQuery()):
     try:
-        db_query = db.query(Alert)
+        # Build query
+        mongo_query = {}
         if query.timeframe:
             hours = int(query.timeframe.replace("h", ""))
             time_threshold = datetime.utcnow() - timedelta(hours=hours)
-            db_query = db_query.filter(Alert.timestamp >= time_threshold)
-        
-        from sqlalchemy.sql import func
-        summary = db_query.group_by(Alert.rule_level).with_entities(
-            Alert.rule_level, func.count(Alert.id).label("count")
-        ).all()
-        
+            mongo_query["timestamp"] = {"$gte": time_threshold}
+
+        # Aggregate by rule_level
+        pipeline = [
+            {"$match": mongo_query},
+            {
+                "$group": {
+                    "_id": "$rule_level",
+                    "count": {"$sum": 1}
+                }
+            },
+            {
+                "$project": {
+                    "rule_level": "$_id",
+                    "count": 1,
+                    "_id": 0
+                }
+            }
+        ]
+        summary = list(alerts_collection.aggregate(pipeline))
         return {
-            "summary": [{"rule_level": r.rule_level, "count": r.count} for r in summary],
+            "summary": summary,
             "total": len(summary)
         }
     except Exception as e:
@@ -184,18 +186,37 @@ async def get_alerts_summary(query: SummaryQuery = Depends(), db: Session = Depe
     "/agents",
     summary="Fetch agent information from alerts"
 )
-async def get_agents(query: AgentQuery = Depends(), db: Session = Depends(get_db)):
+async def get_agents(query: AgentQuery = AgentQuery()):
     try:
-        db_query = db.query(Alert.agent_id, Alert.agent_name).distinct()
+        # Aggregate distinct agents
+        pipeline = [
+            {
+                "$group": {
+                    "_id": {
+                        "agent_id": "$agent_id",
+                        "agent_name": "$agent_name"
+                    }
+                }
+            },
+            {
+                "$project": {
+                    "agent_id": "$_id.agent_id",
+                    "agent_name": "$_id.agent_name",
+                    "_id": 0
+                }
+            },
+            {"$skip": query.offset},
+            {"$limit": query.limit}
+        ]
+        agents = list(alerts_collection.aggregate(pipeline))
+        total = alerts_collection.count_documents({})
+
         if query.status:
             logger.warning("Agent status filter not supported in this implementation")
-        
-        total = db_query.count()
-        agents = db_query.offset(query.offset).limit(query.limit).all()
-        
+
         return {
             "agents": [
-                {"id": a.agent_id, "name": a.agent_name} for a in agents
+                {"id": a["agent_id"], "name": a["agent_name"]} for a in agents
             ],
             "total": total
         }
